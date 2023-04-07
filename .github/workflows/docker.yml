@@ -1,0 +1,82 @@
+name: "Docker"
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 0 * * *'  # every day at midnight
+    
+permissions:
+  contents: "write"
+  packages: "write"
+  
+env:
+  CONTAINER_REGISTRY: ghcr.io
+  CONTAINER_NAME: ${{ github.repository }}
+  
+jobs:
+  release:
+    runs-on: "ubuntu-latest"
+    
+    steps:
+      - name: "Checkout Repository"
+        uses: "actions/checkout@v3"
+        
+      - name: "Reactivate Repository"
+        uses: "custom-workflows/reactivate@latest"
+        with: 
+          commit_message: "github-actions: Reactivate repository"
+          committer_username: "GitHub Actions [Bot]"
+          committer_email: "github-actions[bot]@users.noreply.github.com"
+          days_elapsed: 50
+          
+      - name: "Fetch Latest Version [github.com]"
+        id: "github"
+        shell: "bash"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          latest_version=$(gh release view --repo asciidoctor/docker-asciidoctor --json tagName --template {{.tagName}})
+
+          echo "latest_version=$latest_version" >> "$GITHUB_OUTPUT"
+
+      - name: "Fetch Latest Version [ghcr.io]"
+        continue-on-error: true
+        id: "ghcr"
+        shell: "bash"
+        run: |-
+          curl \
+            --silent \
+            --fail \
+            --head \
+            --header "Authorization: Bearer $(echo ${{ secrets.GITHUB_TOKEN }} | base64 )" \
+            https://${{ env.CONTAINER_REGISTRY }}/v2/${{ env.CONTAINER_NAME }}/manifests/${{ steps.github.outputs.latest_version }}
+            
+      - name: "Login [ghcr.io]"
+        if: ${{ steps.ghcr.outcome == 'failure' }}
+        uses: "docker/login-action@v2.1.0"
+        with:
+          registry: ${{ env.CONTAINER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      
+      - name: "Extract MetaData (Tags, Labels)"
+        if: ${{ steps.ghcr.outcome == 'failure' }}
+        id: "metadata"
+        uses: "docker/metadata-action@v4.3.0"
+        with:
+          images: ${{ env.CONTAINER_REGISTRY }}/${{ env.CONTAINER_NAME }}
+          tags: |
+            ${{ steps.github.outputs.latest_version }}
+            latest
+          labels: |
+            org.opencontainers.image.title=AsciiDoctor
+            org.opencontainers.image.version=${{ steps.github.outputs.latest_version }}
+          
+      - name: "Build & Push"
+        if: ${{ steps.ghcr.outcome == 'failure' }}
+        uses: "docker/build-push-action@v4.0.0"
+        with:
+          context: "."
+          push: "true"
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
